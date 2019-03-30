@@ -61,41 +61,42 @@ module.exports = function (app) {
               default: false,
               title: 'Reject self signed and invalid server certificates'
             },
-            topic: {
-              type: 'string',
-              default: `signalk/delta/${app.selfId}`,
-              title: 'Topic to publish to'
-            },
             bufferTime: {
               type: 'integer',
               default: 5,
-              title: 'Send buffering interval in seconds'
+              title: 'Maximum send buffering interval in seconds'
+            },
+            maxUpdatesToBuffer: {
+              type: 'integer',
+              default: 100,
+              title: 'Maximum number of updates to buffer before sending'
             },
             sendAll: {
               type: 'boolean',
               default: true,
               title: 'Send all data (add individual paths below if unchecked)'
-            },
-            paths: {
-              type: 'array',
-              title:
-                "Signal K self paths to send (used when 'Send all data' is unchecked)",
-              default: [{ path: 'navigation.position', interval: 60 }],
-              items: {
-                type: 'object',
-                properties: {
-                  path: {
-                    type: 'string',
-                    title: 'Path'
-                  },
-                  interval: {
-                    type: 'number',
-                    title:
-                      'Minimum interval between updates for this path to be sent to the server'
-                  }
-                }
-              }
             }
+            ,
+            // paths: {
+            //   type: 'array',
+            //   title:
+            //     "Signal K self paths to send (used when 'Send all data' is unchecked)",
+            //   default: [{ path: 'navigation.position', interval: 60 }],
+            //   items: {
+            //     type: 'object',
+            //     properties: {
+            //       path: {
+            //         type: 'string',
+            //         title: 'Path'
+            //       },
+            //       interval: {
+            //         type: 'number',
+            //         title:
+            //           'Minimum interval between updates for this path to be sent to the server'
+            //       }
+            //     }
+            //   }
+            // }
           }
         }
       }
@@ -107,21 +108,23 @@ module.exports = function (app) {
   plugin.start = function (options) {
     plugin.onStop = []
 
-    plugin.clientsData = options.targets.map(target => {
+    const topic = `signalk/delta/${app.selfId}`
+
+    plugin.clientsData = options.targets.map(stashTarget => {
       const dbPath = path.join(
         app.getDataDirPath(),
-        target.remoteHost.replace(nonAlphaNumerics, '_')
+        stashTarget.remoteHost.replace(nonAlphaNumerics, '_')
       )
       const manager = NeDBStore(dbPath)
       const client = mqtt.connect(
-        target.remoteHost,
+        stashTarget.remoteHost,
         {
           rejectUnauthorized: options.rejectUnauthorized,
           reconnectPeriod: 60000,
           clientId: app.selfId,
           outgoingStore: manager.outgoing,
-          username: target.username,
-          password: target.password
+          username: stashTarget.username,
+          password: stashTarget.password
         }
       )
 
@@ -131,31 +134,54 @@ module.exports = function (app) {
 
       client.on('connect', () => {
         result.connected = true
-        console.log(`${target.remoteHost} connected`)
+        app.setProviderStatus(`${stashTarget.remoteHost} connected`)
+        client.subscribe(`${topic}/stats`, () => {
+          console.log(`Subscribed to ${topic}/stats`)
+        })
+        client.on('message', (topic, payload, packet) => {
+          console.log
+          app.setProviderStatus(`${new Date()} ${payload.toString} messages stashed`)
+        })
       })
       client.on('error', err => console.error(err))
       client.on('disconnect', () => {
         result.connected = false
-        console.log(`${target.remoteHost} disconnected`)
+        console.log(`${stashTarget.remoteHost} disconnected`)
       })
 
       let updatesAccumulator = []
       const deltaHandler = delta => {
-        if (delta.context && delta.context === app.selfContext) {
+        if (
+          (delta.context && delta.context === app.selfContext) ||
+          !delta.context
+        ) {
           updatesAccumulator = updatesAccumulator.concat(delta.updates)
-          if (updatesAccumulator.length > 20) {
-            client.publish(
-              target.topic,
-              JSON.stringify({ updates: updatesAccumulator })
-            )
-            updatesAccumulator = []
-          }
         }
       }
       app.signalk.on('delta', deltaHandler)
       plugin.onStop.push(() =>
         app.signalk.removeListener('delta', deltaHandler)
       )
+
+      let lastSend = 0
+      const sendTimer = setInterval(() => {
+        if (
+          updatesAccumulator.length > stashTarget.maxUpdatesToBuffer ||
+          Date.now() > lastSend + stashTarget.bufferTime * 1000
+        ) {
+          console.log(`Sending ${updatesAccumulator.length} updates to ${topic}`)
+          client.publish(
+            topic,
+            JSON.stringify({ updates: updatesAccumulator }),
+            { qos: 1 }
+          )
+          updatesAccumulator = []
+          lastSend = Date.now()
+        }
+      }, 1000)
+      plugin.onStop.push(() => {
+        clearInterval(sendTimer)
+      })
 
       return result
     })
