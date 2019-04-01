@@ -76,7 +76,6 @@ module.exports = function (app) {
               default: true,
               title: 'Send all data (add individual paths below if unchecked)'
             }
-            ,
             // paths: {
             //   type: 'array',
             //   title:
@@ -136,11 +135,17 @@ module.exports = function (app) {
         result.connected = true
         app.setProviderStatus(`${stashTarget.remoteHost} connected`)
         client.subscribe(`${topic}/stats`, () => {
-          console.log(`Subscribed to ${topic}/stats`)
+          app.debug(`Subscribed to ${topic}/stats`)
         })
         client.on('message', (topic, payload, packet) => {
-          console.log
-          app.setProviderStatus(`${new Date()} ${payload.toString} messages stashed`)
+          try {
+            const stats = JSON.parse(payload.toString())
+            app.setProviderStatus(
+              `${stats.deltas} messages stashed in ${stats.periodLength / 1000} seconds (${stats.timestamp})`
+            )
+          } catch (ex) {
+            console.log(`Error parsing stats message: ${payload.toString()}`)
+          }
         })
       })
       client.on('error', err => console.error(err))
@@ -169,7 +174,9 @@ module.exports = function (app) {
           updatesAccumulator.length > stashTarget.maxUpdatesToBuffer ||
           Date.now() > lastSend + stashTarget.bufferTime * 1000
         ) {
-          console.log(`Sending ${updatesAccumulator.length} updates to ${topic}`)
+          app.debug(
+            `Sending ${updatesAccumulator.length} updates to ${topic}`
+          )
           client.publish(
             topic,
             JSON.stringify({ updates: updatesAccumulator }),
